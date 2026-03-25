@@ -1,10 +1,10 @@
 {
   "files": {
-    "main.js": "/migracao-wmi/static/js/main.ff07f212.js",
+    "main.js": "/migracao-wmi/static/js/main.23a4968d.js",
     "index.html": "/migracao-wmi/index.html",
-    "main.ff07f212.js.map": "/migracao-wmi/static/js/main.ff07f212.js.map"
+    "main.23a4968d.js.map": "/migracao-wmi/static/js/main.23a4968d.js.map"
   },
   "entrypoints": [
-    "static/js/main.ff07f212.js"
+    "static/js/main.23a4968d.js"
   ]
 }
