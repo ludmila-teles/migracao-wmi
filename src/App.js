@@ -1,4 +1,6 @@
 import { useState, useEffect, useRef } from "react";
+import { db } from "./firebase";
+import { doc, onSnapshot, setDoc } from "firebase/firestore";
 
 const STATUS_ORDER = ["pending", "in_progress", "done", "blocked"];
 const STATUS = {
@@ -28,9 +30,13 @@ function buildStatus(products) {
   return s;
 }
 
-const STORAGE_KEY = "migration_v5";
-function persist(data) { try { localStorage.setItem(STORAGE_KEY, JSON.stringify(data)); } catch {} }
-function hydrate() { try { const r = localStorage.getItem(STORAGE_KEY); return r ? JSON.parse(r) : null; } catch { return null; } }
+const DOC_REF = () => doc(db, "migracao", "estado");
+
+function persist(data) {
+  setDoc(DOC_REF(), data).catch(console.error);
+}
+
+function hydrate() { return null; } // substituído pelo listener do Firebase
 
 function mergeWithInitial(saved) {
   if (!saved) return { products: INITIAL_PRODUCTS, compStatus: buildStatus(INITIAL_PRODUCTS) };
@@ -172,21 +178,18 @@ function ComponentList({ pid, components, compStatus, onReorder, onCycle, onSetN
   );
 }
 
-function ProductList({ products, renderCard }) {
+function ProductList({ products, onReorder, renderCard }) {
   const dragIdx = useRef(null);
   const overIdx = useRef(null);
-  const [order, setOrder] = useState(products.map((_, i) => i));
-
-  useEffect(() => { setOrder(products.map((_, i) => i)); }, [products.length]);
 
   const handleDragStart = (i, e) => { dragIdx.current = i; e.dataTransfer.effectAllowed = "move"; e.currentTarget.style.opacity = "0.4"; };
   const handleDragEnd = (e) => {
     e.currentTarget.style.opacity = "1";
     if (dragIdx.current !== null && overIdx.current !== null && dragIdx.current !== overIdx.current) {
-      const next = [...order];
+      const next = [...products];
       const [moved] = next.splice(dragIdx.current, 1);
       next.splice(overIdx.current, 0, moved);
-      setOrder(next);
+      onReorder(next);
     }
     dragIdx.current = null; overIdx.current = null;
   };
@@ -194,26 +197,22 @@ function ProductList({ products, renderCard }) {
 
   return (
     <>
-      {order.map((pi, vi) => {
-        const p = products[pi];
-        if (!p) return null;
-        return (
-          <div key={p.id} draggable
-            onDragStart={e => handleDragStart(vi, e)}
-            onDragEnd={handleDragEnd}
-            onDragOver={e => handleDragOver(vi, e)}>
-            {renderCard(p)}
-          </div>
-        );
-      })}
+      {products.map((p, i) => (
+        <div key={p.id} draggable
+          onDragStart={e => handleDragStart(i, e)}
+          onDragEnd={handleDragEnd}
+          onDragOver={e => handleDragOver(i, e)}>
+          {renderCard(p)}
+        </div>
+      ))}
     </>
   );
 }
 
 export default function App() {
-  const { products: initProducts, compStatus: initStatus } = mergeWithInitial(hydrate());
-  const [products, setProducts]     = useState(initProducts);
-  const [compStatus, setCompStatus] = useState(initStatus);
+  const [products, setProducts]     = useState(INITIAL_PRODUCTS);
+  const [compStatus, setCompStatus] = useState(buildStatus(INITIAL_PRODUCTS));
+  const [loaded, setLoaded]         = useState(false);
   const [view, setView]             = useState("dashboard");
   const [expanded, setExpanded]     = useState({});
   const [editNote, setEditNote]     = useState(null);
@@ -223,7 +222,29 @@ export default function App() {
   const [addComp, setAddComp]       = useState({});
   const [filterStatus, setFilter]   = useState("all");
 
-  useEffect(() => { persist({ products, compStatus }); }, [products, compStatus]);
+  // Listener em tempo real do Firebase
+  useEffect(() => {
+    const unsub = onSnapshot(DOC_REF(), (snap) => {
+      if (snap.exists()) {
+        const data = snap.data();
+        const merged = mergeWithInitial(data);
+        setProducts(merged.products);
+        setCompStatus(merged.compStatus);
+      } else {
+        // Primeiro acesso: salva os dados iniciais no Firebase
+        const initial = mergeWithInitial(null);
+        persist(initial);
+      }
+      setLoaded(true);
+    });
+    return () => unsub();
+  }, []);
+
+  // Salva no Firebase sempre que mudar
+  useEffect(() => {
+    if (!loaded) return;
+    persist({ products, compStatus });
+  }, [products, compStatus]);
 
   const cycleStatus = (pid, comp) => setCompStatus(prev => {
     const cur = prev[pid]?.[comp]?.status || "pending";
@@ -269,6 +290,12 @@ export default function App() {
     setCompStatus(prev => { const cp = { ...prev }; delete cp[id]; return cp; });
   };
 
+  if (!loaded) return (
+    <div style={{ display: "flex", alignItems: "center", justifyContent: "center", minHeight: "100vh", fontFamily: "Inter,sans-serif", color: "#64748b", fontSize: 15 }}>
+      Carregando dados... ⏳
+    </div>
+  );
+
   const stats = globalStats(products, compStatus);
   const filteredProducts = filterStatus === "all" ? products
     : products.filter(p => {
@@ -283,7 +310,7 @@ export default function App() {
     <div style={{ fontFamily: "'Inter',sans-serif", background: "#f8fafc", minHeight: "100vh", paddingBottom: 40 }}>
       <div style={{ background: "#0f172a", padding: "18px 28px", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
         <div>
-          <div style={{ color: "#fff", fontWeight: 800, fontSize: 18 }}>🚀 Migração dos Produtos WMI</div>
+          <div style={{ color: "#fff", fontWeight: 800, fontSize: 18 }}>🚀 Migração dos Produtos WMI (Em Homologação)</div>
           <div style={{ color: "#94a3b8", fontSize: 12, marginTop: 2 }}>Migração por produto · {products.length} produtos</div>
         </div>
         <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
@@ -311,7 +338,7 @@ export default function App() {
                 </div>
               </div>
               <div style={{ flex: 1 }}>
-                <div style={{ fontSize: 20, fontWeight: 800, color: "#0f172a", marginBottom: 4 }}>Progresso Geral da Migração</div>
+                <div style={{ fontSize: 20, fontWeight: 800, color: "#0f172a", marginBottom: 4 }}>Progresso Geral da Migração (Em Homologação)</div>
                 <div style={{ fontSize: 13, color: "#64748b", marginBottom: 16 }}>
                   {stats.counts.done} de {stats.total} componentes concluídos em {products.length} produtos
                 </div>
@@ -324,7 +351,7 @@ export default function App() {
               </div>
             </div>
             <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))", gap: 14 }}>
-              <ProductList products={products} renderCard={p => {
+              <ProductList products={products} onReorder={setProducts} renderCard={p => {
                 const { pct, done, total } = progress(p, compStatus);
                 const blocked = p.components.filter(c => compStatus[p.id]?.[c]?.status === "blocked").length;
                 const inprog  = p.components.filter(c => compStatus[p.id]?.[c]?.status === "in_progress").length;
@@ -392,7 +419,7 @@ export default function App() {
               <span style={{ marginLeft: "auto", fontSize: 11, color: "#94a3b8" }}>⠿ Arraste para reordenar</span>
             </div>
             <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-              <ProductList products={filteredProducts} renderCard={p => {
+              <ProductList products={filteredProducts} onReorder={setProducts} renderCard={p => {
                 const { pct, done, total } = progress(p, compStatus);
                 const isOpen = expanded[p.id];
                 return (
