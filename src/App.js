@@ -1,484 +1,535 @@
-import './App.css';
+import { useState, useEffect, useRef } from "react";
+import { db } from "./firebase";
+import { doc, onSnapshot, setDoc } from "firebase/firestore";
 
-function Tag({ type, children }) {
-  return <span className={`tag tag-${type}`}>{children}</span>;
+const STATUS_ORDER = ["pending", "in_progress", "done", "blocked"];
+const STATUS = {
+  pending:     { label: "Pendente",      color: "#94a3b8", bg: "#f1f5f9", dot: "#94a3b8" },
+  in_progress: { label: "Em andamento",  color: "#d97706", bg: "#fef3c7", dot: "#f59e0b" },
+  done:        { label: "Concluído",     color: "#059669", bg: "#d1fae5", dot: "#10b981" },
+  blocked:     { label: "Impedimento",   color: "#dc2626", bg: "#fee2e2", dot: "#ef4444" },
+};
+
+const ETAPAS_PADRAO = [
+  "Homolog: Ambientes",
+  "Homolog: Banco de Dados",
+  "Homolog: Aplicações",
+  "Gate de Aprovação",
+  "Produção: Ambientes",
+  "Produção: Banco de Dados",
+  "Produção: Aplicações",
+  "Descomissionamento Verteron",
+];
+
+const INITIAL_PRODUCTS = [
+  { id: "laudos",      name: "Laudos",                 color: "#1a6640", wave: "Abril 2026",
+    components: ["Bucket Azure", ...ETAPAS_PADRAO] },
+  { id: "amplum",      name: "Amplum",                 color: "#1a4a7a", wave: "Abril 2026",
+    components: [...ETAPAS_PADRAO] },
+  { id: "autolac",     name: "Autolac (+ Interlac)",   color: "#0ea5e9", wave: "Maio 2026",
+    components: [...ETAPAS_PADRAO] },
+  { id: "animallis",   name: "Animallis",               color: "#10b981", wave: "Maio 2026",
+    components: [...ETAPAS_PADRAO] },
+  { id: "integre",     name: "Integre",                 color: "#f59e0b", wave: "Maio / Junho 2026",
+    components: ETAPAS_PADRAO.map(e => e === "Produção: Aplicações" ? "Produção: Aplicações (+ RabbitMQ)" : e) },
+  { id: "painel_adm",  name: "Painel Administrativo",   color: "#8b5cf6", wave: "Maio / Junho 2026",
+    components: [...ETAPAS_PADRAO] },
+  { id: "minha_conta", name: "Minha Conta Web",         color: "#3b82f6", wave: "Junho 2026",
+    components: [...ETAPAS_PADRAO] },
+  { id: "allis",       name: "Allis",                   color: "#ec4899", wave: "Junho 2026",
+    components: [...ETAPAS_PADRAO] },
+];
+
+const INITIAL_STATUS_OVERRIDES = {
+  laudos: { "Bucket Azure": { status: "done", note: "Ativo desde 01/04/2026" } },
+};
+
+function buildStatus(products) {
+  const s = {};
+  for (const p of products) {
+    s[p.id] = {};
+    for (const c of p.components) {
+      s[p.id][c] = INITIAL_STATUS_OVERRIDES[p.id]?.[c] || { status: "pending", note: "" };
+    }
+  }
+  return s;
 }
 
-function PhasePill({ type, children }) {
-  return <span className={`phase-pill pill-${type}`}>{children}</span>;
+const DOC_REF = () => doc(db, "migracao", "estado");
+
+function persist(data) {
+  setDoc(DOC_REF(), data).catch(console.error);
 }
 
-function Callout({ children }) {
-  return <div className="callout">{children}</div>;
+function mergeWithInitial(saved) {
+  if (!saved) return { products: INITIAL_PRODUCTS, compStatus: buildStatus(INITIAL_PRODUCTS) };
+  const savedIds = new Set(saved.products.map(p => p.id));
+  const missing = INITIAL_PRODUCTS.filter(p => !savedIds.has(p.id));
+  const products = [...saved.products, ...missing];
+  const compStatus = { ...saved.compStatus };
+  for (const p of missing) {
+    compStatus[p.id] = {};
+    for (const c of p.components) compStatus[p.id][c] = INITIAL_STATUS_OVERRIDES[p.id]?.[c] || { status: "pending", note: "" };
+  }
+  return { products, compStatus };
 }
 
-function CalloutWarn({ children }) {
-  return <div className="callout-warn">{children}</div>;
+function progress(product, compStatus) {
+  const total = product.components.length;
+  if (!total) return { pct: 0, done: 0, total: 0 };
+  const done = product.components.filter(c => compStatus[product.id]?.[c]?.status === "done").length;
+  return { pct: Math.round((done / total) * 100), done, total };
 }
 
-function CalloutBucket({ children }) {
-  return <div className="callout-bucket">{children}</div>;
+function globalStats(products, compStatus) {
+  const all = products.flatMap(p => p.components.map(c => compStatus[p.id]?.[c]?.status || "pending"));
+  const counts = { pending: 0, in_progress: 0, done: 0, blocked: 0 };
+  for (const s of all) counts[s] = (counts[s] || 0) + 1;
+  return { counts, total: all.length, pct: all.length ? Math.round((counts.done / all.length) * 100) : 0 };
 }
 
-function TlItem({ dotColor, hasLine = true, label, labelColor, desc }) {
+function Ring({ pct, color, size = 80, stroke = 8 }) {
+  const r = (size - stroke) / 2;
+  const circ = 2 * Math.PI * r;
+  const offset = circ - (pct / 100) * circ;
   return (
-    <div className="tl-item">
-      <div className="tl-marker">
-        <div className="tl-dot" style={dotColor ? { background: dotColor } : {}} />
-        {hasLine && <div className="tl-line" />}
+    <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`} style={{ transform: "rotate(-90deg)" }}>
+      <circle cx={size/2} cy={size/2} r={r} fill="none" stroke="#e2e8f0" strokeWidth={stroke} />
+      <circle cx={size/2} cy={size/2} r={r} fill="none" stroke={color} strokeWidth={stroke}
+        strokeDasharray={circ} strokeDashoffset={offset} strokeLinecap="round"
+        style={{ transition: "stroke-dashoffset 0.5s ease" }} />
+    </svg>
+  );
+}
+
+function StatCard({ label, value, color, bg }) {
+  return (
+    <div style={{ flex: 1, minWidth: 80, background: bg, borderRadius: 12, padding: "14px 16px", textAlign: "center" }}>
+      <div style={{ fontSize: 26, fontWeight: 800, color }}>{value}</div>
+      <div style={{ fontSize: 11, color: "#64748b", marginTop: 2, fontWeight: 500 }}>{label}</div>
+    </div>
+  );
+}
+
+function ComponentList({ pid, components, compStatus, onReorder, onCycle, onSetNote, onRemove, editNote, setEditNote, addComp, setAddComp, onAddComp }) {
+  const dragIdx = useRef(null);
+  const overIdx = useRef(null);
+
+  const handleDragStart = (i, e) => {
+    dragIdx.current = i;
+    e.dataTransfer.effectAllowed = "move";
+    e.currentTarget.style.opacity = "0.4";
+  };
+  const handleDragEnd = (e) => {
+    e.currentTarget.style.opacity = "1";
+    if (dragIdx.current !== null && overIdx.current !== null && dragIdx.current !== overIdx.current) {
+      const next = [...components];
+      const [moved] = next.splice(dragIdx.current, 1);
+      next.splice(overIdx.current, 0, moved);
+      onReorder(pid, next);
+    }
+    dragIdx.current = null;
+    overIdx.current = null;
+  };
+  const handleDragOver = (i, e) => {
+    e.preventDefault();
+    overIdx.current = i;
+  };
+
+  return (
+    <div style={{ padding: "4px 20px 20px", borderTop: "1px solid #f1f5f9" }}>
+      <div style={{ fontSize: 11, color: "#94a3b8", margin: "10px 0 8px", paddingLeft: 4 }}>
+        ⠿ Arraste para reordenar
       </div>
-      <div>
-        <div className="tl-label" style={labelColor ? { color: labelColor } : {}}>{label}</div>
-        <div className="tl-desc">{desc}</div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+        {components.map((comp, i) => {
+          const cs = compStatus[pid]?.[comp] || { status: "pending", note: "" };
+          const st = STATUS[cs.status];
+          const isEditN = editNote?.pid === pid && editNote?.comp === comp;
+          return (
+            <div key={comp} draggable
+              onDragStart={e => handleDragStart(i, e)}
+              onDragEnd={handleDragEnd}
+              onDragOver={e => handleDragOver(i, e)}
+              style={{ display: "flex", alignItems: "flex-start", gap: 10, background: "#f8fafc", borderRadius: 10, padding: "10px 14px", border: "1px solid #e9eef5", cursor: "grab", userSelect: "none" }}>
+              <span style={{ color: "#cbd5e1", fontSize: 16, lineHeight: "22px", flexShrink: 0 }}>⠿</span>
+              <div style={{ flex: 1 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                  <span style={{ width: 8, height: 8, borderRadius: "50%", background: st.dot, display: "inline-block", flexShrink: 0 }} />
+                  <span style={{ fontSize: 13, fontWeight: 600, color: "#1e293b" }}>{comp}</span>
+                  <button onClick={() => onCycle(pid, comp)}
+                    style={{ fontSize: 11, padding: "3px 12px", borderRadius: 99, border: "none", background: st.bg, color: st.color, fontWeight: 700, cursor: "pointer" }}>
+                    {st.label} ↻
+                  </button>
+                  <button onClick={() => setEditNote(isEditN ? null : { pid, comp })}
+                    style={{ fontSize: 12, background: "none", border: "none", cursor: "pointer", color: cs.note ? "#6366f1" : "#cbd5e1" }}>📝</button>
+                  <button onClick={() => onRemove(pid, comp)}
+                    style={{ marginLeft: "auto", fontSize: 11, color: "#fca5a5", background: "none", border: "none", cursor: "pointer" }}>✕</button>
+                </div>
+                {cs.note && !isEditN && (
+                  <div style={{ fontSize: 12, color: "#6366f1", marginTop: 5, paddingLeft: 16, borderLeft: "2px solid #c7d2fe", fontStyle: "italic" }}>{cs.note}</div>
+                )}
+                {isEditN && (
+                  <div style={{ marginTop: 8, display: "flex", gap: 6 }}>
+                    <input autoFocus value={cs.note}
+                      onChange={e => onSetNote(pid, comp, e.target.value)}
+                      onKeyDown={e => e.key === "Enter" && setEditNote(null)}
+                      placeholder="Observação..."
+                      style={{ flex: 1, fontSize: 12, border: "1px solid #e2e8f0", borderRadius: 6, padding: "5px 10px", outline: "none" }} />
+                    <button onClick={() => setEditNote(null)} style={{ fontSize: 12, background: "#6366f1", color: "#fff", border: "none", borderRadius: 6, padding: "5px 12px", cursor: "pointer" }}>OK</button>
+                  </div>
+                )}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+      <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
+        <input
+          placeholder="+ Adicionar etapa ou componente..."
+          value={addComp[pid] || ""}
+          onChange={e => setAddComp(a => ({ ...a, [pid]: e.target.value }))}
+          onKeyDown={e => { if (e.key === "Enter") { onAddComp(pid, addComp[pid]); setAddComp(a => ({ ...a, [pid]: "" })); }}}
+          style={{ flex: 1, fontSize: 12, border: "1px dashed #cbd5e1", borderRadius: 8, padding: "7px 12px", outline: "none", color: "#64748b", background: "#f8fafc" }}
+        />
+        <button onClick={() => { onAddComp(pid, addComp[pid]); setAddComp(a => ({ ...a, [pid]: "" })); }}
+          style={{ background: "#6366f1", color: "#fff", border: "none", borderRadius: 8, padding: "7px 14px", fontSize: 12, fontWeight: 600, cursor: "pointer" }}>
+          Adicionar
+        </button>
       </div>
     </div>
   );
 }
 
-function Roadmap() {
+function ProductList({ products, onReorder, renderCard }) {
+  const dragIdx = useRef(null);
+  const overIdx = useRef(null);
+
+  const handleDragStart = (i, e) => { dragIdx.current = i; e.dataTransfer.effectAllowed = "move"; e.currentTarget.style.opacity = "0.4"; };
+  const handleDragEnd = (e) => {
+    e.currentTarget.style.opacity = "1";
+    if (dragIdx.current !== null && overIdx.current !== null && dragIdx.current !== overIdx.current) {
+      const next = [...products];
+      const [moved] = next.splice(dragIdx.current, 1);
+      next.splice(overIdx.current, 0, moved);
+      onReorder(next);
+    }
+    dragIdx.current = null; overIdx.current = null;
+  };
+  const handleDragOver = (i, e) => { e.preventDefault(); overIdx.current = i; };
+
   return (
     <>
-      <h1>Roadmap 2026 – Migração por Produto</h1>
-      <table className="roadmap-grid">
-        <thead>
-          <tr>
-            <th className="col-produto">Produto</th>
-            <th colSpan={4} style={{ borderRight: "2px solid #0d3060" }}>Abril</th>
-            <th colSpan={4} style={{ borderRight: "2px solid #0d3060" }}>Maio</th>
-            <th colSpan={4}>Junho</th>
-          </tr>
-          <tr>
-            <th className="col-produto">Semana →</th>
-            <th>S1<br /><span style={{ fontWeight: 400, fontSize: 10 }}>31/03</span></th>
-            <th>S2<br /><span style={{ fontWeight: 400, fontSize: 10 }}>07/04</span></th>
-            <th>S3<br /><span style={{ fontWeight: 400, fontSize: 10 }}>14/04</span></th>
-            <th style={{ borderRight: "2px solid #0d3060" }}>S4<br /><span style={{ fontWeight: 400, fontSize: 10 }}>28/04</span></th>
-            <th>S5<br /><span style={{ fontWeight: 400, fontSize: 10 }}>05/05</span></th>
-            <th>S6<br /><span style={{ fontWeight: 400, fontSize: 10 }}>12/05</span></th>
-            <th>S7<br /><span style={{ fontWeight: 400, fontSize: 10 }}>19/05</span></th>
-            <th style={{ borderRight: "2px solid #0d3060" }}>S8<br /><span style={{ fontWeight: 400, fontSize: 10 }}>26/05</span></th>
-            <th>S9<br /><span style={{ fontWeight: 400, fontSize: 10 }}>02/06</span></th>
-            <th>S10<br /><span style={{ fontWeight: 400, fontSize: 10 }}>09/06</span></th>
-            <th>S11<br /><span style={{ fontWeight: 400, fontSize: 10 }}>16/06</span></th>
-            <th>S12<br /><span style={{ fontWeight: 400, fontSize: 10 }}>23/06</span></th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr>
-            <td className="produto-name">Laudos</td>
-            <td className="cell-bucket"><Tag type="b">Bucket</Tag></td>
-            <td className="cell-homolog"><Tag type="h">Homolog</Tag></td>
-            <td className="cell-homolog"><Tag type="h">Homolog</Tag></td>
-            <td className="cell-prod" style={{ borderRight: "2px solid #0d3060" }}><Tag type="p">Produção</Tag></td>
-            <td /><td /><td /><td style={{ borderRight: "2px solid #0d3060" }} />
-            <td /><td /><td /><td />
-          </tr>
-          <tr>
-            <td className="produto-name">Amplum</td>
-            <td className="cell-homolog"><Tag type="h">Homolog</Tag></td>
-            <td className="cell-homolog"><Tag type="h">Homolog</Tag></td>
-            <td className="cell-homolog"><Tag type="h">Homolog</Tag></td>
-            <td className="cell-prod" style={{ borderRight: "2px solid #0d3060" }}><Tag type="p">Produção</Tag></td>
-            <td /><td /><td /><td style={{ borderRight: "2px solid #0d3060" }} />
-            <td /><td /><td /><td />
-          </tr>
-          <tr>
-            <td className="produto-name">Autolac <span style={{ fontSize: 10, color: "#888" }}>(+ Interlac)</span></td>
-            <td /><td /><td />
-            <td style={{ borderRight: "2px solid #0d3060" }} />
-            <td className="cell-homolog"><Tag type="h">Homolog</Tag></td>
-            <td className="cell-homolog"><Tag type="h">Homolog</Tag></td>
-            <td className="cell-prod"><Tag type="p">Produção</Tag></td>
-            <td className="cell-prod" style={{ borderRight: "2px solid #0d3060" }}><Tag type="p">Produção</Tag></td>
-            <td /><td /><td /><td />
-          </tr>
-          <tr>
-            <td className="produto-name">Animallis</td>
-            <td /><td /><td />
-            <td style={{ borderRight: "2px solid #0d3060" }} />
-            <td className="cell-homolog"><Tag type="h">Homolog</Tag></td>
-            <td className="cell-homolog"><Tag type="h">Homolog</Tag></td>
-            <td className="cell-prod"><Tag type="p">Produção</Tag></td>
-            <td className="cell-prod" style={{ borderRight: "2px solid #0d3060" }}><Tag type="p">Produção</Tag></td>
-            <td /><td /><td /><td />
-          </tr>
-          <tr>
-            <td className="produto-name">Integre</td>
-            <td /><td /><td />
-            <td style={{ borderRight: "2px solid #0d3060" }} /><td />
-            <td className="cell-homolog"><Tag type="h">Homolog</Tag></td>
-            <td className="cell-homolog"><Tag type="h">Homolog</Tag></td>
-            <td className="cell-prod" style={{ borderRight: "2px solid #0d3060" }}><Tag type="p">Produção</Tag></td>
-            <td className="cell-prod"><Tag type="p">Produção</Tag></td>
-            <td /><td /><td />
-          </tr>
-          <tr>
-            <td className="produto-name">Painel Administrativo</td>
-            <td /><td /><td />
-            <td style={{ borderRight: "2px solid #0d3060" }} /><td />
-            <td className="cell-homolog"><Tag type="h">Homolog</Tag></td>
-            <td className="cell-homolog"><Tag type="h">Homolog</Tag></td>
-            <td className="cell-prod" style={{ borderRight: "2px solid #0d3060" }}><Tag type="p">Produção</Tag></td>
-            <td className="cell-prod"><Tag type="p">Produção</Tag></td>
-            <td /><td /><td />
-          </tr>
-          <tr>
-            <td className="produto-name">Minha Conta Web</td>
-            <td /><td /><td />
-            <td style={{ borderRight: "2px solid #0d3060" }} /><td /><td /><td />
-            <td style={{ borderRight: "2px solid #0d3060" }} />
-            <td className="cell-homolog"><Tag type="h">Homolog</Tag></td>
-            <td className="cell-homolog"><Tag type="h">Homolog</Tag></td>
-            <td className="cell-prod"><Tag type="p">Produção</Tag></td>
-            <td className="cell-prod"><Tag type="p">Produção</Tag></td>
-          </tr>
-          <tr>
-            <td className="produto-name">Allis</td>
-            <td /><td /><td />
-            <td style={{ borderRight: "2px solid #0d3060" }} /><td /><td /><td />
-            <td style={{ borderRight: "2px solid #0d3060" }} />
-            <td className="cell-homolog"><Tag type="h">Homolog</Tag></td>
-            <td className="cell-homolog"><Tag type="h">Homolog</Tag></td>
-            <td className="cell-prod"><Tag type="p">Produção</Tag></td>
-            <td className="cell-prod"><Tag type="p">Produção</Tag></td>
-          </tr>
-          <tr>
-            <td className="produto-name">Demais produtos</td>
-            <td /><td /><td />
-            <td style={{ borderRight: "2px solid #0d3060" }} /><td /><td /><td />
-            <td style={{ borderRight: "2px solid #0d3060" }} />
-            <td className="cell-homolog"><Tag type="est">A definir</Tag></td>
-            <td className="cell-homolog"><Tag type="est">A definir</Tag></td>
-            <td className="cell-prod"><Tag type="est">A definir</Tag></td>
-            <td className="cell-prod"><Tag type="est">A definir</Tag></td>
-          </tr>
-        </tbody>
-      </table>
-
-      <div className="legend">
-        <div className="legend-item">
-          <div className="legend-dot" style={{ background: "#c2e8d2", border: "1px solid #8bcfaa" }} />
-          Migração em homologação
+      {products.map((p, i) => (
+        <div key={p.id} draggable
+          onDragStart={e => handleDragStart(i, e)}
+          onDragEnd={handleDragEnd}
+          onDragOver={e => handleDragOver(i, e)}>
+          {renderCard(p)}
         </div>
-        <div className="legend-item">
-          <div className="legend-dot" style={{ background: "#b8d9f5", border: "1px solid #7ab8e8" }} />
-          Migração em produção
-        </div>
-        <div className="legend-item">
-          <div className="legend-dot" style={{ background: "#ffe0b2", border: "1px solid #ffb74d" }} />
-          Bucket Azure ativo (Laudos – a partir de 01/04)
-        </div>
-        <div className="legend-item">
-          <div className="legend-dot" style={{ background: "#e8e8e8", border: "1px solid #ccc" }} />
-          Prazo a definir
-        </div>
-      </div>
-
-      <Callout>
-        <strong>Dinâmica de execução:</strong> cada produto percorre homologação → gate de aprovação → produção antes de o próximo ser priorizado. Os prazos indicados são estimativas iniciais e serão revisados conforme o andamento de cada produto.
-      </Callout>
+      ))}
     </>
-  );
-}
-
-function FluxoMigracao() {
-  return (
-    <>
-      <h1>Fluxo de Migração – Aplicado a Cada Produto</h1>
-      <p>O fluxo de 4 etapas abaixo é executado duas vezes para cada produto: primeiro em homologação e depois em produção. A sequência é fixa – cada etapa é pré-requisito da seguinte.</p>
-
-      <div className="steps">
-        <div className="step"><div className="step-num">Etapa 1</div><div className="step-label">Migração dos ambientes</div></div>
-        <div className="step"><div className="step-num">Etapa 2</div><div className="step-label">Migração dos bancos de dados</div></div>
-        <div className="step"><div className="step-num">Etapa 3</div><div className="step-label">Alteração das strings de conexão</div></div>
-        <div className="step"><div className="step-num">Etapa 4</div><div className="step-label">Migração das aplicações</div></div>
-      </div>
-
-      <table className="scope">
-        <thead>
-          <tr>
-            <th>Etapa</th>
-            <th>Descrição</th>
-            <th>Critério de Avanço</th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr>
-            <td>Etapa 1 – Migração dos ambientes</td>
-            <td>Provisionar e configurar no Azure a infraestrutura equivalente ao ambiente Verteron do produto: redes (VNet), firewall, IAM, armazenamento (Azure Blob Storage) e demais recursos necessários.</td>
-            <td>Infraestrutura provisionada, acessível e validada no Azure para o produto.</td>
-          </tr>
-          <tr>
-            <td>Etapa 2 – Migração dos bancos de dados</td>
-            <td>Migrar o banco de dados do produto da Verteron para o Azure, com atualização de versão quando necessário. Todos os bancos MySQL estão na versão 5.7.42, fora de suporte ativo. A versão de destino (8.0 ou 8.4 LTS) deve ser validada com o time de desenvolvimento antes da execução.</td>
-            <td>Banco migrado, íntegro, acessível, com testes de regressão aprovados e rollback documentado.</td>
-          </tr>
-          <tr>
-            <td>Etapa 3 – Alteração das strings de conexão</td>
-            <td>Com o banco já no Azure, alterar as strings de conexão das aplicações ainda rodando na Verteron para apontar para o banco no novo ambiente, validando operação cruzada.</td>
-            <td>Aplicação na Verteron conectada e operando com o banco no Azure sem erros.</td>
-          </tr>
-          <tr>
-            <td>Etapa 4 – Migração das aplicações</td>
-            <td>Migrar as aplicações do produto – incluindo serviços de mensageria (RabbitMQ, quando aplicável) e integrações externas – para o Azure, conectando ao banco já migrado. Cutover e validação fim a fim. Ambiente Verteron em standby para rollback.</td>
-            <td>Aplicação operando integralmente no Azure. Testes end-to-end aprovados. Critérios de aceite cumpridos.</td>
-          </tr>
-        </tbody>
-      </table>
-    </>
-  );
-}
-
-function ServidorSection() {
-  return (
-    <div className="produto-section">
-      <div className="produto-header servidor">
-        <h1>Servidor app.lifesys.com.br – Mapeamento de APIs e Produtos</h1>
-        <div className="sub">Levantamento das APIs hospedadas no servidor – ativas, de suporte e obsoletas – para orientar a migração</div>
-      </div>
-      <div className="produto-body">
-        <p>O servidor <strong>app.lifesys.com.br</strong> hospeda múltiplas APIs e produtos WMI. O mapeamento abaixo detalha o status de cada pasta, seu vínculo com os produtos do roadmap e a decisão de migração. As APIs obsoletas e inativas serão avaliadas individualmente antes da execução para decidir entre migração ou descarte.</p>
-
-        <CalloutWarn>
-          <strong>Ação necessária antes da migração:</strong> as APIs marcadas como "Avaliar" precisam de análise técnica para confirmar se possuem dependências ativas antes de serem descartadas ou migradas. Recomenda-se concluir essa avaliação antes do início da Fase de Homologação do servidor.
-        </CalloutWarn>
-
-        <table className="scope">
-          <thead>
-            <tr>
-              <th>Pasta / API</th>
-              <th>Status</th>
-              <th>Vínculo</th>
-              <th>Decisão de Migração</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr><td>laudos</td><td><span className="status-ativo">Ativa</span></td><td>Produto Laudos · Suporte ao Painel Administrativo</td><td>Migrar – contemplada na onda do Laudos (Abril) e do Painel Administrativo (Maio/Junho)</td></tr>
-            <tr><td>LaudosWs</td><td><span className="status-ativo">Ativa</span></td><td>Suporte ao produto Laudos – responsável pelo envio de laudos para a internet</td><td>Migrar – contemplada na onda do Laudos (Abril)</td></tr>
-            <tr><td>laudosCloud</td><td><span className="status-ativo">Ativa</span></td><td>Suporte ao produto Autolac</td><td>Migrar – contemplada na onda do Autolac (Maio)</td></tr>
-            <tr><td>MinhaConta</td><td><span className="status-ativo">Ativa</span></td><td>Suporte ao Painel Administrativo · Minha Conta Web · Laudos · Minha Conta Local</td><td>Migrar – contemplada nas ondas dos produtos que a utilizam</td></tr>
-            <tr><td>atendimentoOnline</td><td><span className="status-ativo">Ativa</span></td><td>Produto Animallis</td><td>Migrar – contemplada na onda do Animallis (Maio)</td></tr>
-            <tr><td>breedApi</td><td><span className="status-ativo">Ativa</span></td><td>Suporte ao produto Animallis (raças e espécies)</td><td>Migrar – contemplada na onda do Animallis (Maio)</td></tr>
-            <tr><td>pacienteApp</td><td><span className="status-ativo">Ativa</span></td><td>Produto Allis</td><td>Migrar – contemplada na onda do Allis (Junho)</td></tr>
-            <tr><td>atualizador</td><td><span className="status-ativo">Ativa</span></td><td>Suporte ao produto Autolac</td><td>Migrar – contemplada na onda do Autolac (Maio)</td></tr>
-            <tr><td>AutoAtualizador</td><td><span className="status-ativo">Ativa</span></td><td>Suporte ao produto Integre · Interlac (componente do Autolac)</td><td>Migrar – contemplada nas ondas do Integre e do Autolac</td></tr>
-            <tr><td>cep</td><td><span className="status-ativo">Ativa</span></td><td>Suporte ao produto Autolac · Painel Administrativo</td><td>Migrar – contemplada nas ondas do Autolac e do Painel Administrativo</td></tr>
-            <tr><td>dominio</td><td><span className="status-ativo">Ativa</span></td><td>Suporte ao produto Amplum · Painel Administrativo</td><td>Migrar – contemplada nas ondas do Amplum (Abril) e do Painel Administrativo</td></tr>
-            <tr><td>contaAzul</td><td><span className="status-ativo">Ativa</span></td><td>Suporte ao produto Painel Administrativo</td><td>Migrar – contemplada na onda do Painel Administrativo (Maio/Junho)</td></tr>
-            <tr><td>SPData</td><td><span className="status-ativo">Ativa</span></td><td>Suporte ao produto Integre – responsável pela comunicação com o RabbitMQ</td><td>Migrar – contemplada na onda do Integre (Maio/Junho)</td></tr>
-            <tr><td>assinaPdf</td><td><span className="status-obs">Avaliar</span></td><td>Sem utilização atual · qualquer produto pode utilizar para assinar PDF</td><td>Avaliar necessidade antes de migrar ou descartar</td></tr>
-            <tr><td>clinica</td><td><span className="status-inativo">Obsoleta</span></td><td>Produto Meu Consultório – inativo</td><td>Avaliar descarte antes da migração do servidor</td></tr>
-            <tr><td>conecte</td><td><span className="status-inativo">Obsoleta</span></td><td>Produto inativo</td><td>Avaliar descarte antes da migração do servidor</td></tr>
-            <tr><td>converse</td><td><span className="status-inativo">Obsoleta</span></td><td>Produto inativo</td><td>Avaliar descarte antes da migração do servidor</td></tr>
-            <tr><td>dadosmc</td><td><span className="status-inativo">Obsoleta</span></td><td>Produto Meu Consultório – inativo</td><td>Avaliar descarte antes da migração do servidor</td></tr>
-            <tr><td>dados-mc</td><td><span className="status-inativo">Obsoleta</span></td><td>Produto Meu Consultório – inativo</td><td>Avaliar descarte antes da migração do servidor</td></tr>
-            <tr><td>Fatura</td><td><span className="status-inativo">Obsoleta</span></td><td>Atendimento antigo · Painel Administrativo – inativo</td><td>Avaliar descarte antes da migração do servidor</td></tr>
-            <tr><td>mail</td><td><span className="status-inativo">Obsoleta</span></td><td>E-mails do Grupo Sym – inativo</td><td>Avaliar descarte antes da migração do servidor</td></tr>
-            <tr><td>minhaContaConect</td><td><span className="status-inativo">Obsoleta</span></td><td>Sem utilização</td><td>Avaliar descarte antes da migração do servidor</td></tr>
-            <tr><td>MinhaContaHomologacao</td><td><span className="status-inativo">Obsoleta</span></td><td>Sem utilização</td><td>Avaliar descarte antes da migração do servidor</td></tr>
-            <tr><td>PainelControle</td><td><span className="status-inativo">Obsoleta</span></td><td>Sem utilização</td><td>Avaliar descarte antes da migração do servidor</td></tr>
-          </tbody>
-        </table>
-      </div>
-    </div>
-  );
-}
-
-function ProdutoLaudos() {
-  return (
-    <div className="produto-section">
-      <div className="produto-header laudos">
-        <h1>Produto Laudos – Abril de 2026</h1>
-        <div className="sub">Prioridade 1 &nbsp;|&nbsp; Bucket Azure ativo a partir de 01/04 &nbsp;|&nbsp; Homologação: S2–S3 (07–18/04) &nbsp;|&nbsp; Produção: S4 (28/04)</div>
-      </div>
-      <div className="produto-body">
-        <h2>Objetivo</h2>
-        <p>Migrar o produto Laudos da Verteron para o Azure, garantindo continuidade no envio e armazenamento de laudos para a internet. A partir de 1º de abril de 2026, todos os novos laudos enviados para a internet passam a ser armazenados diretamente no bucket Azure em produção, reduzindo significativamente o volume de arquivos a migrar da Verteron no cutover final – que contemplará apenas os laudos gerados até 31 de março de 2026. A API <strong>laudos</strong> também é utilizada pelo Painel Administrativo e será migrada nesta onda.</p>
-
-        <CalloutBucket>
-          <strong>Particularidade – Bucket Azure ativo a partir de 01/04/2026:</strong> o bucket Azure Blob Storage para laudos estará ativo em produção desde o início do projeto. Novos laudos já são gravados no Azure a partir desta data. O cutover final migrará apenas os laudos históricos (março para trás), tornando o processo mais rápido e com menor risco de perda de dados.
-        </CalloutBucket>
-
-        <h2>APIs e Componentes Envolvidos</h2>
-        <table className="scope">
-          <thead><tr><th>Componente</th><th>Função</th></tr></thead>
-          <tbody>
-            <tr><td>laudos</td><td>API principal do produto Laudos · suporte ao Painel Administrativo</td></tr>
-            <tr><td>LaudosWs</td><td>Suporte ao Laudos – responsável pelo envio de laudos para a internet</td></tr>
-            <tr><td>MinhaConta</td><td>Suporte à autenticação e conta do usuário (compartilhada com outros produtos)</td></tr>
-          </tbody>
-        </table>
-
-        <h2>Servidores Envolvidos</h2>
-        <table className="scope">
-          <thead><tr><th>Ambiente</th><th>Servidor</th><th>Tipo</th></tr></thead>
-          <tbody>
-            <tr><td><PhasePill type="h">Homolog</PhasePill></td><td>homolog.app.lifesys.com.br</td><td>Servidor de aplicação / web</td></tr>
-            <tr><td><PhasePill type="h">Homolog</PhasePill></td><td>MySQL - DBServer WMI - Homologação - 18.04</td><td>Banco de dados (requer atualização de SO e MySQL)</td></tr>
-            <tr><td><PhasePill type="p">Produção</PhasePill></td><td>app.lifesys.com.br</td><td>Servidor de aplicação / web</td></tr>
-            <tr><td><PhasePill type="p">Produção</PhasePill></td><td>MySQL - DBServer WMI - Produção - 18.04</td><td>Banco de dados (requer atualização de SO e MySQL)</td></tr>
-          </tbody>
-        </table>
-
-        <h2>Timeline</h2>
-        <div className="timeline">
-          <TlItem
-            dotColor="#1a6640"
-            label="01/04/2026 – Bucket Azure ativo em produção"
-            desc="Criação e ativação do bucket Azure Blob Storage. A partir desta data, todos os novos laudos enviados para a internet são gravados diretamente no Azure."
-          />
-          <TlItem
-            label="Semanas 2–3 de Abril (07/04 – 18/04) – Migração em Homologação"
-            desc="Execução das 4 etapas em homologação: provisionamento da infraestrutura, migração e atualização do banco MySQL, alteração das strings de conexão e migração da aplicação. Testes end-to-end."
-          />
-          <TlItem
-            dotColor="#e8a020"
-            label="Final da Semana 3 (18/04) – Gate de Aprovação"
-            desc="Validação dos critérios de aceite em homologação. Aprovação formal para início da migração em produção."
-          />
-          <TlItem
-            label="Semana 4 de Abril (28/04) – Migração em Produção"
-            desc="Execução das 4 etapas em produção. Migração dos laudos históricos (março para trás) da Verteron para o Azure. Cutover final. Testes end-to-end e validação dos critérios de aceite."
-          />
-          <TlItem
-            dotColor="#3a9a6a"
-            hasLine={false}
-            label="Conclusão – Laudos 100% no Azure"
-            labelColor="#1a6640"
-            desc="Ambiente Verteron do Laudos em standby para rollback. Após estabilização confirmada, recursos Verteron do Laudos descomissionados."
-          />
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function ProdutoAmplum() {
-  return (
-    <div className="produto-section">
-      <div className="produto-header amplum">
-        <h1>Produto Amplum – Abril de 2026</h1>
-        <div className="sub">Prioridade 2 &nbsp;|&nbsp; Homologação: S1–S3 (01–18/04) &nbsp;|&nbsp; Produção: S4 (28/04)</div>
-      </div>
-      <div className="produto-body">
-        <h2>Objetivo</h2>
-        <p>Migrar o produto Amplum da Verteron para o Azure, seguindo o fluxo padrão de 4 etapas em homologação e, aprovado, em produção. A migração envolve múltiplos servidores de backend, um servidor web/proxy em Ubuntu 18.04 (requer atualização de SO) e o serviço Jitsi de videochamada. As APIs <strong>dominio</strong> (compartilhada com o Painel Administrativo) e <strong>MinhaConta</strong> também serão migradas nesta onda.</p>
-
-        <h2>APIs e Componentes Envolvidos</h2>
-        <table className="scope">
-          <thead><tr><th>Componente</th><th>Função</th></tr></thead>
-          <tbody>
-            <tr><td>dominio</td><td>Suporte ao Amplum e ao Painel Administrativo</td></tr>
-            <tr><td>MinhaConta</td><td>Suporte à autenticação e conta do usuário (compartilhada com outros produtos)</td></tr>
-          </tbody>
-        </table>
-
-        <h2>Servidores Envolvidos</h2>
-        <table className="scope">
-          <thead><tr><th>Ambiente</th><th>Servidor</th><th>Tipo</th></tr></thead>
-          <tbody>
-            <tr><td><PhasePill type="h">Homolog</PhasePill></td><td>Amplum-Homolog (backend1)</td><td>Servidor de aplicação</td></tr>
-            <tr><td><PhasePill type="h">Homolog</PhasePill></td><td>MySQL - DBServer WMI - Homologação - 18.04</td><td>Banco de dados (requer atualização de SO e MySQL)</td></tr>
-            <tr><td><PhasePill type="p">Produção</PhasePill></td><td>Amplum-Apache-Nginx (ubuntu18.04)</td><td>Servidor web / proxy (requer atualização de SO)</td></tr>
-            <tr><td><PhasePill type="p">Produção</PhasePill></td><td>Amplum-Producao-Backend1</td><td>Servidor de aplicação</td></tr>
-            <tr><td><PhasePill type="p">Produção</PhasePill></td><td>Amplum-Producao-Backend2</td><td>Servidor de aplicação</td></tr>
-            <tr><td><PhasePill type="p">Produção</PhasePill></td><td>MySQL - DBServer WMI - Produção - 18.04</td><td>Banco de dados (requer atualização de SO e MySQL)</td></tr>
-            <tr><td><PhasePill type="p">Produção</PhasePill></td><td>Jitsi-VideoChamada-Amplum</td><td>Servidor de videoconferência (requer validação de portas e rede)</td></tr>
-          </tbody>
-        </table>
-
-        <h2>Timeline</h2>
-        <div className="timeline">
-          <TlItem
-            label="Semanas 1–3 de Abril (01/04 – 18/04) – Migração em Homologação"
-            desc="Execução das 4 etapas em homologação: provisionamento da infraestrutura, migração e atualização do banco MySQL, alteração das strings de conexão e migração do backend de homologação. Testes end-to-end."
-          />
-          <TlItem
-            dotColor="#e8a020"
-            label="Final da Semana 3 (18/04) – Gate de Aprovação"
-            desc="Validação dos critérios de aceite em homologação. Aprovação formal para início da migração em produção."
-          />
-          <TlItem
-            label="Semana 4 de Abril (28/04) – Migração em Produção"
-            desc="Execução das 4 etapas em produção para todos os servidores Amplum, incluindo Jitsi. Cutover final. Testes end-to-end e validação dos critérios de aceite."
-          />
-          <TlItem
-            dotColor="#3a9a6a"
-            hasLine={false}
-            label="Conclusão – Amplum 100% no Azure"
-            labelColor="#3a9a6a"
-            desc="Ambiente Verteron do Amplum em standby para rollback. Após estabilização confirmada, recursos Verteron do Amplum descomissionados."
-          />
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function DemaisProdutos() {
-  return (
-    <div className="produto-section">
-      <div className="produto-header demais">
-        <h1>Demais Produtos – Maio e Junho de 2026</h1>
-        <div className="sub">Autolac (+ Interlac) &nbsp;|&nbsp; Animallis &nbsp;|&nbsp; Integre &nbsp;|&nbsp; Painel Administrativo &nbsp;|&nbsp; Minha Conta Web &nbsp;|&nbsp; Allis &nbsp;|&nbsp; e outros</div>
-      </div>
-      <div className="produto-body">
-        <h2>Objetivo</h2>
-        <p>Após a conclusão das migrações de Laudos e Amplum em abril, os demais produtos WMI entram na fila de migração ao longo de maio e junho, seguindo o mesmo fluxo de 4 etapas (homologação → gate → produção). A ordem de priorização dentro deste grupo e o detalhamento de servidores, APIs e timelines serão definidos com base nos aprendizados das ondas anteriores e na capacidade do time.</p>
-
-        <Callout>
-          <strong>Planejamento a detalhar:</strong> o escopo detalhado de cada produto deste grupo – servidores, APIs de suporte, ordem de priorização e particularidades técnicas – será documentado em versão atualizada deste projeto ao término da migração do Amplum, incorporando os aprendizados das ondas de abril.
-        </Callout>
-
-        <h2>Produtos Previstos</h2>
-        <table className="scope">
-          <thead>
-            <tr>
-              <th>Produto</th>
-              <th>APIs / Componentes no app.lifesys.com.br</th>
-              <th>Previsão</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr><td>Autolac (+ Interlac)</td><td>atualizador · AutoAtualizador · cep · laudosCloud</td><td>Maio de 2026</td></tr>
-            <tr><td>Animallis</td><td>atendimentoOnline · breedApi</td><td>Maio de 2026</td></tr>
-            <tr><td>Integre</td><td>AutoAtualizador · SPData (comunicação RabbitMQ)</td><td>Maio / Junho de 2026</td></tr>
-            <tr><td>Painel Administrativo</td><td>laudos · MinhaConta · dominio · cep · contaAzul</td><td>Maio / Junho de 2026</td></tr>
-            <tr><td>Minha Conta Web</td><td>MinhaConta</td><td>Junho de 2026</td></tr>
-            <tr><td>Allis</td><td>pacienteApp</td><td>Junho de 2026</td></tr>
-            <tr><td>Demais produtos</td><td>A identificar</td><td>Maio / Junho de 2026</td></tr>
-          </tbody>
-        </table>
-      </div>
-    </div>
   );
 }
 
 export default function App() {
+  const [products, setProducts]     = useState(INITIAL_PRODUCTS);
+  const [compStatus, setCompStatus] = useState(buildStatus(INITIAL_PRODUCTS));
+  const [loaded, setLoaded]         = useState(false);
+  const [view, setView]             = useState("dashboard");
+  const [expanded, setExpanded]     = useState({});
+  const [editNote, setEditNote]     = useState(null);
+  const [modal, setModal]           = useState(false);
+  const [np, setNp]                 = useState({ name: "", color: "#6366f1", wave: "", components: [...ETAPAS_PADRAO] });
+  const [npInput, setNpInput]       = useState("");
+  const [addComp, setAddComp]       = useState({});
+  const [filterStatus, setFilter]   = useState("all");
+
+  useEffect(() => {
+    const unsub = onSnapshot(DOC_REF(), (snap) => {
+      if (snap.exists()) {
+        const data = snap.data();
+        const merged = mergeWithInitial(data);
+        setProducts(merged.products);
+        setCompStatus(merged.compStatus);
+      } else {
+        const initial = mergeWithInitial(null);
+        persist(initial);
+      }
+      setLoaded(true);
+    });
+    return () => unsub();
+  }, []);
+
+  useEffect(() => {
+    if (!loaded) return;
+    persist({ products, compStatus });
+  }, [products, compStatus]);
+
+  const cycleStatus = (pid, comp) => setCompStatus(prev => {
+    const cur = prev[pid]?.[comp]?.status || "pending";
+    const next = STATUS_ORDER[(STATUS_ORDER.indexOf(cur) + 1) % STATUS_ORDER.length];
+    return { ...prev, [pid]: { ...prev[pid], [comp]: { ...prev[pid][comp], status: next } } };
+  });
+
+  const setNote = (pid, comp, note) => setCompStatus(prev => ({
+    ...prev, [pid]: { ...prev[pid], [comp]: { ...prev[pid][comp], note } }
+  }));
+
+  const addComponent = (pid, val) => {
+    if (!val?.trim()) return;
+    const c = val.trim();
+    setProducts(prev => prev.map(p => p.id === pid ? { ...p, components: [...p.components, c] } : p));
+    setCompStatus(prev => ({ ...prev, [pid]: { ...prev[pid], [c]: { status: "pending", note: "" } } }));
+  };
+
+  const removeComponent = (pid, comp) => {
+    setProducts(prev => prev.map(p => p.id === pid ? { ...p, components: p.components.filter(c => c !== comp) } : p));
+    setCompStatus(prev => { const cp = { ...prev[pid] }; delete cp[comp]; return { ...prev, [pid]: cp }; });
+  };
+
+  const reorderComponents = (pid, newComps) => {
+    setProducts(prev => prev.map(p => p.id === pid ? { ...p, components: newComps } : p));
+  };
+
+  const createProduct = () => {
+    if (!np.name.trim()) return;
+    const id = np.name.toLowerCase().replace(/\s+/g, "_") + "_" + Date.now();
+    const comps = np.components.filter(Boolean);
+    setProducts(prev => [...prev, { id, name: np.name.trim(), color: np.color, wave: np.wave, components: comps }]);
+    setCompStatus(prev => {
+      const s = {}; for (const c of comps) s[c] = { status: "pending", note: "" };
+      return { ...prev, [id]: s };
+    });
+    setNp({ name: "", color: "#6366f1", wave: "", components: [...ETAPAS_PADRAO] });
+    setModal(false);
+  };
+
+  const removeProduct = (id) => {
+    setProducts(prev => prev.filter(p => p.id !== id));
+    setCompStatus(prev => { const cp = { ...prev }; delete cp[id]; return cp; });
+  };
+
+  if (!loaded) return (
+    <div style={{ display: "flex", alignItems: "center", justifyContent: "center", minHeight: "100vh", fontFamily: "Inter,sans-serif", color: "#64748b", fontSize: 15 }}>
+      Carregando dados... ⏳
+    </div>
+  );
+
+  const stats = globalStats(products, compStatus);
+  const filteredProducts = filterStatus === "all" ? products
+    : products.filter(p => {
+        const comps = p.components.map(c => compStatus[p.id]?.[c]?.status || "pending");
+        if (filterStatus === "done")        return comps.every(s => s === "done");
+        if (filterStatus === "blocked")     return comps.some(s => s === "blocked");
+        if (filterStatus === "in_progress") return comps.some(s => s === "in_progress") && !comps.every(s => s === "done");
+        return comps.every(s => s === "pending");
+      });
+
   return (
-    <div className="doc">
-      <div className="doc-title">Projeto Migração Ambientes e Produtos WMI</div>
-      <div className="doc-meta">Versão 1.0 &nbsp;|&nbsp; Elaboração: Ludmila Teles &nbsp;|&nbsp; Abril – Junho de 2026</div>
+    <div style={{ fontFamily: "'Inter',sans-serif", background: "#f8fafc", minHeight: "100vh", paddingBottom: 40 }}>
+      <div style={{ background: "#0f172a", padding: "18px 28px", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+        <div>
+          <div style={{ color: "#fff", fontWeight: 800, fontSize: 18 }}>Migração WMI → Azure</div>
+          <div style={{ color: "#94a3b8", fontSize: 12, marginTop: 2 }}>Abril – Junho 2026 · {products.length} produtos · migração por produto</div>
+        </div>
+        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          {["dashboard","board"].map(v => (
+            <button key={v} onClick={() => setView(v)} style={{
+              padding: "6px 16px", borderRadius: 8, border: "none", cursor: "pointer", fontSize: 12, fontWeight: 600,
+              background: view === v ? "#6366f1" : "#1e293b", color: view === v ? "#fff" : "#94a3b8"
+            }}>{v === "dashboard" ? "📊 Dashboard" : "📋 Detalhes"}</button>
+          ))}
+          <button onClick={() => setModal(true)} style={{ marginLeft: 8, padding: "6px 16px", borderRadius: 8, border: "none", cursor: "pointer", fontSize: 12, fontWeight: 600, background: "#6366f1", color: "#fff" }}>
+            + Produto
+          </button>
+        </div>
+      </div>
 
-      <p>O Projeto Migração Ambientes e Produtos WMI tem como objetivo migrar toda a infraestrutura e os produtos WMI, atualmente hospedados na Verteron, para o ambiente Azure, garantindo continuidade operacional, integridade dos dados e ausência de ruptura para os clientes.</p>
-      <p>A estratégia adota uma abordagem de migração <strong>por produto</strong>: cada produto percorre seu próprio ciclo completo – homologação e, aprovado, produção – antes de o próximo ser iniciado. O Laudos possui uma particularidade: a partir de <strong>1º de abril de 2026</strong>, todos os novos laudos enviados para a internet já são armazenados diretamente no bucket Azure em produção, reduzindo o volume de dados históricos a migrar da Verteron no cutover final.</p>
+      <div style={{ maxWidth: 1100, margin: "0 auto", padding: "24px 20px" }}>
+        {view === "dashboard" && (
+          <>
+            <div style={{ background: "#fff", borderRadius: 16, padding: "28px 32px", marginBottom: 20, border: "1px solid #e2e8f0", display: "flex", alignItems: "center", gap: 32, boxShadow: "0 2px 8px rgba(0,0,0,0.06)" }}>
+              <div style={{ position: "relative", flexShrink: 0 }}>
+                <Ring pct={stats.pct} color="#6366f1" size={110} stroke={10} />
+                <div style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center" }}>
+                  <span style={{ fontSize: 22, fontWeight: 800, color: "#0f172a" }}>{stats.pct}%</span>
+                  <span style={{ fontSize: 10, color: "#94a3b8", marginTop: 1 }}>concluído</span>
+                </div>
+              </div>
+              <div style={{ flex: 1 }}>
+                <div style={{ fontSize: 20, fontWeight: 800, color: "#0f172a", marginBottom: 4 }}>Progresso Geral da Migração</div>
+                <div style={{ fontSize: 13, color: "#64748b", marginBottom: 16 }}>
+                  {stats.counts.done} de {stats.total} etapas concluídas em {products.length} produtos
+                </div>
+                <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+                  <StatCard label="Pendentes"    value={stats.counts.pending}     color="#94a3b8" bg="#f8fafc" />
+                  <StatCard label="Em andamento" value={stats.counts.in_progress} color="#d97706" bg="#fffbeb" />
+                  <StatCard label="Concluídas"   value={stats.counts.done}        color="#059669" bg="#f0fdf4" />
+                  <StatCard label="Impedimentos" value={stats.counts.blocked}     color="#dc2626" bg="#fff1f2" />
+                </div>
+              </div>
+            </div>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))", gap: 14 }}>
+              <ProductList products={products} onReorder={setProducts} renderCard={p => {
+                const { pct, done, total } = progress(p, compStatus);
+                const blocked = p.components.filter(c => compStatus[p.id]?.[c]?.status === "blocked").length;
+                const inprog  = p.components.filter(c => compStatus[p.id]?.[c]?.status === "in_progress").length;
+                return (
+                  <div style={{ background: "#fff", borderRadius: 14, border: "1px solid #e2e8f0", padding: "20px", boxShadow: "0 1px 4px rgba(0,0,0,0.05)", cursor: "grab", userSelect: "none" }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 14 }}>
+                      <div style={{ display: "flex", alignItems: "flex-start", gap: 6 }}>
+                        <span style={{ color: "#cbd5e1", fontSize: 16, marginTop: 2 }}>⠿</span>
+                        <div>
+                          <div style={{ fontWeight: 700, fontSize: 15, color: "#0f172a" }}>{p.name}</div>
+                          {p.wave && <div style={{ fontSize: 11, color: "#94a3b8", marginTop: 1 }}>{p.wave}</div>}
+                        </div>
+                      </div>
+                      <div style={{ position: "relative", flexShrink: 0 }}>
+                        <Ring pct={pct} color={p.color} size={56} stroke={6} />
+                        <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center" }}>
+                          <span style={{ fontSize: 12, fontWeight: 800, color: p.color }}>{pct}%</span>
+                        </div>
+                      </div>
+                    </div>
+                    <div style={{ display: "flex", flexWrap: "wrap", gap: 5, marginBottom: 12 }}>
+                      {p.components.map(c => {
+                        const s = compStatus[p.id]?.[c]?.status || "pending";
+                        const st = STATUS[s];
+                        return (
+                          <span key={c} title={`${c}: ${st.label}`}
+                            style={{ fontSize: 11, padding: "3px 9px", borderRadius: 99, background: st.bg, color: st.color, fontWeight: 600, cursor: "pointer" }}
+                            onClick={() => { setView("board"); setExpanded(e => ({ ...e, [p.id]: true })); }}>
+                            {c}
+                          </span>
+                        );
+                      })}
+                    </div>
+                    <div style={{ background: "#f1f5f9", borderRadius: 99, height: 6, marginBottom: 10 }}>
+                      <div style={{ background: pct === 100 ? "#10b981" : p.color, borderRadius: 99, height: 6, width: `${pct}%`, transition: "width 0.5s" }} />
+                    </div>
+                    <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11, color: "#94a3b8" }}>
+                      <span>{done}/{total} etapas</span>
+                      <span style={{ display: "flex", gap: 8 }}>
+                        {inprog  > 0 && <span style={{ color: "#d97706" }}>⏳ {inprog}</span>}
+                        {blocked > 0 && <span style={{ color: "#ef4444" }}>🔴 {blocked} impedimento{blocked > 1 ? "s" : ""}</span>}
+                      </span>
+                    </div>
+                    <button onClick={() => { setView("board"); setExpanded(e => ({ ...e, [p.id]: true })); }}
+                      style={{ marginTop: 12, width: "100%", padding: "7px", borderRadius: 8, border: "1px solid #e2e8f0", background: "#f8fafc", color: "#475569", fontSize: 12, fontWeight: 600, cursor: "pointer" }}>
+                      Ver detalhes →
+                    </button>
+                  </div>
+                );
+              }} />
+            </div>
+          </>
+        )}
 
-      <Roadmap />
-      <FluxoMigracao />
-      <ServidorSection />
-      <ProdutoLaudos />
-      <ProdutoAmplum />
-      <DemaisProdutos />
+        {view === "board" && (
+          <>
+            <div style={{ display: "flex", gap: 8, marginBottom: 16, flexWrap: "wrap", alignItems: "center" }}>
+              {[["all","Todos"],["pending","Pendentes"],["in_progress","Em andamento"],["done","Concluídos"],["blocked","Impedimentos"]].map(([k,l]) => (
+                <button key={k} onClick={() => setFilter(k)} style={{
+                  padding: "5px 14px", borderRadius: 99, border: "1px solid " + (filterStatus === k ? "#0f172a" : "#e2e8f0"),
+                  cursor: "pointer", fontSize: 12, fontWeight: 600,
+                  background: filterStatus === k ? "#0f172a" : "#fff", color: filterStatus === k ? "#fff" : "#64748b"
+                }}>{l}</button>
+              ))}
+              <span style={{ marginLeft: "auto", fontSize: 11, color: "#94a3b8" }}>⠿ Arraste para reordenar</span>
+            </div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+              <ProductList products={filteredProducts} onReorder={setProducts} renderCard={p => {
+                const { pct, done, total } = progress(p, compStatus);
+                const isOpen = expanded[p.id];
+                return (
+                  <div style={{ background: "#fff", borderRadius: 14, border: "1px solid #e2e8f0", overflow: "hidden", boxShadow: "0 1px 4px rgba(0,0,0,0.05)", cursor: isOpen ? "default" : "grab" }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 12, padding: "16px 20px", borderLeft: `5px solid ${p.color || "#e2e8f0"}`, userSelect: "none" }}>
+                      <span style={{ color: "#cbd5e1", fontSize: 18, flexShrink: 0 }}>⠿</span>
+                      <div style={{ flex: 1, cursor: "pointer" }} onClick={() => setExpanded(e => ({ ...e, [p.id]: !e[p.id] }))}>
+                        <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 2, flexWrap: "wrap" }}>
+                          <span style={{ fontWeight: 700, fontSize: 16, color: "#0f172a" }}>{p.name}</span>
+                          {p.wave && <span style={{ fontSize: 11, color: "#94a3b8" }}>{p.wave}</span>}
+                          {pct === 100 && <span style={{ fontSize: 11, background: "#d1fae5", color: "#059669", borderRadius: 99, padding: "2px 8px", fontWeight: 700 }}>✓ Concluído</span>}
+                          {p.components.some(c => compStatus[p.id]?.[c]?.status === "blocked") && (
+                            <span style={{ fontSize: 11, background: "#fee2e2", color: "#dc2626", borderRadius: 99, padding: "2px 8px", fontWeight: 700 }}>⚠ Impedimento</span>
+                          )}
+                        </div>
+                        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                          <div style={{ flex: 1, maxWidth: 280, background: "#e2e8f0", borderRadius: 99, height: 6 }}>
+                            <div style={{ background: pct === 100 ? "#10b981" : (p.color || "#6366f1"), borderRadius: 99, height: 6, width: `${pct}%`, transition: "width 0.4s" }} />
+                          </div>
+                          <span style={{ fontSize: 12, fontWeight: 700, color: "#64748b" }}>{pct}% · {done}/{total}</span>
+                        </div>
+                      </div>
+                      <span onClick={() => setExpanded(e => ({ ...e, [p.id]: !e[p.id] }))} style={{ color: "#94a3b8", fontSize: 16, cursor: "pointer" }}>{isOpen ? "▲" : "▼"}</span>
+                    </div>
+                    {isOpen && (
+                      <>
+                        <ComponentList
+                          pid={p.id} components={p.components} compStatus={compStatus}
+                          onReorder={reorderComponents} onCycle={cycleStatus} onSetNote={setNote}
+                          onRemove={removeComponent} editNote={editNote} setEditNote={setEditNote}
+                          addComp={addComp} setAddComp={setAddComp} onAddComp={addComponent}
+                        />
+                        <div style={{ padding: "0 20px 16px", display: "flex", justifyContent: "flex-end" }}>
+                          <button onClick={() => removeProduct(p.id)}
+                            style={{ fontSize: 11, color: "#ef4444", background: "none", border: "1px solid #fecaca", borderRadius: 6, padding: "4px 12px", cursor: "pointer" }}>
+                            🗑 Remover produto
+                          </button>
+                        </div>
+                      </>
+                    )}
+                  </div>
+                );
+              }} />
+            </div>
+          </>
+        )}
+      </div>
 
-      <h1>Considerações Finais</h1>
-      <p>Este é o planejamento do Projeto Migração Ambientes e Produtos WMI para Azure, estruturado para garantir controle de risco, rastreabilidade e ausência de impacto operacional. A abordagem por produto permite aprendizado incremental e garante foco em um escopo controlado a cada onda de migração.</p>
-      <p>O Laudos lidera com a vantagem do bucket Azure ativo desde 1º de abril. O Amplum segue em paralelo, com cutover de ambos previsto para a semana de 28 de abril. Os demais produtos – incluindo o Allis, recém-incorporado ao roadmap – entram em ondas subsequentes ao longo de maio e junho, com escopo a detalhar após os aprendizados de abril.</p>
-
-      <CalloutWarn>
-        <strong>Pontos de atenção:</strong> (1) todos os bancos MySQL estão na versão 5.7.42 e os servidores de banco em Ubuntu 18.04, ambos fora de suporte ativo – a versão de destino deve ser validada antes de abril. (2) As APIs obsoletas hospedadas no app.lifesys.com.br precisam de avaliação de descarte antes da migração do servidor. (3) Servidores Windows e serviços com requisitos especiais de rede (pfSense, Jitsi, mail) requerem planejamento específico antes de sua onda.
-      </CalloutWarn>
-
-      <p className="closing-line">Linha de execução: Laudos → Amplum → demais produtos &nbsp;|&nbsp; para cada produto: homologação → gate → produção → descomissionamento Verteron.</p>
+      {modal && (
+        <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 999 }}>
+          <div style={{ background: "#fff", borderRadius: 16, padding: 28, width: 440, maxWidth: "95vw", boxShadow: "0 24px 64px rgba(0,0,0,0.2)" }}>
+            <h2 style={{ margin: "0 0 20px", fontSize: 18, fontWeight: 800, color: "#0f172a" }}>Novo Produto</h2>
+            <label style={{ fontSize: 11, fontWeight: 700, color: "#64748b", display: "block", marginBottom: 4, textTransform: "uppercase" }}>Nome</label>
+            <input autoFocus value={np.name} onChange={e => setNp(n => ({ ...n, name: e.target.value }))}
+              placeholder="Ex: Novo Produto" style={{ width: "100%", fontSize: 14, border: "1px solid #e2e8f0", borderRadius: 8, padding: "9px 12px", outline: "none", marginBottom: 12, boxSizing: "border-box" }} />
+            <label style={{ fontSize: 11, fontWeight: 700, color: "#64748b", display: "block", marginBottom: 4, textTransform: "uppercase" }}>Previsão</label>
+            <input value={np.wave} onChange={e => setNp(n => ({ ...n, wave: e.target.value }))}
+              placeholder="Ex: Junho 2026" style={{ width: "100%", fontSize: 14, border: "1px solid #e2e8f0", borderRadius: 8, padding: "9px 12px", outline: "none", marginBottom: 16, boxSizing: "border-box" }} />
+            <label style={{ fontSize: 11, fontWeight: 700, color: "#64748b", display: "block", marginBottom: 6, textTransform: "uppercase" }}>Cor</label>
+            <div style={{ display: "flex", gap: 8, marginBottom: 16, flexWrap: "wrap" }}>
+              {["#6366f1","#10b981","#f59e0b","#3b82f6","#8b5cf6","#ef4444","#14b8a6","#ec4899","#0ea5e9","#1a4a7a","#1a6640"].map(c => (
+                <div key={c} onClick={() => setNp(n => ({ ...n, color: c }))}
+                  style={{ width: 28, height: 28, borderRadius: "50%", background: c, cursor: "pointer", border: np.color === c ? "3px solid #0f172a" : "3px solid transparent" }} />
+              ))}
+            </div>
+            <label style={{ fontSize: 11, fontWeight: 700, color: "#64748b", display: "block", marginBottom: 6, textTransform: "uppercase" }}>Etapas</label>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 10 }}>
+              {np.components.map(c => (
+                <span key={c} style={{ fontSize: 12, background: "#f1f5f9", border: "1px solid #e2e8f0", borderRadius: 99, padding: "4px 10px", display: "flex", alignItems: "center", gap: 5 }}>
+                  {c}
+                  <button onClick={() => setNp(n => ({ ...n, components: n.components.filter(x => x !== c) }))}
+                    style={{ background: "none", border: "none", cursor: "pointer", color: "#94a3b8", fontSize: 12, padding: 0 }}>✕</button>
+                </span>
+              ))}
+            </div>
+            <div style={{ display: "flex", gap: 6, marginBottom: 22 }}>
+              <input value={npInput} onChange={e => setNpInput(e.target.value)}
+                onKeyDown={e => { if (e.key === "Enter" && npInput.trim()) { setNp(n => ({ ...n, components: [...n.components, npInput.trim()] })); setNpInput(""); }}}
+                placeholder="Adicionar etapa específica..."
+                style={{ flex: 1, fontSize: 13, border: "1px solid #e2e8f0", borderRadius: 8, padding: "7px 10px", outline: "none" }} />
+              <button onClick={() => { if (npInput.trim()) { setNp(n => ({ ...n, components: [...n.components, npInput.trim()] })); setNpInput(""); }}}
+                style={{ background: "#f1f5f9", color: "#374151", border: "1px solid #e2e8f0", borderRadius: 8, padding: "7px 14px", cursor: "pointer", fontSize: 13 }}>+</button>
+            </div>
+            <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
+              <button onClick={() => setModal(false)} style={{ background: "#f1f5f9", color: "#64748b", border: "none", borderRadius: 8, padding: "9px 18px", cursor: "pointer", fontSize: 13 }}>Cancelar</button>
+              <button onClick={createProduct} style={{ background: "#6366f1", color: "#fff", border: "none", borderRadius: 8, padding: "9px 22px", fontWeight: 700, cursor: "pointer", fontSize: 13 }}>Criar Produto</button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
