@@ -63,10 +63,28 @@ function persist(data) {
 
 function mergeWithInitial(saved) {
   if (!saved) return { products: INITIAL_PRODUCTS, compStatus: buildStatus(INITIAL_PRODUCTS) };
+  const initialById = Object.fromEntries(INITIAL_PRODUCTS.map(p => [p.id, p]));
   const savedIds = new Set(saved.products.map(p => p.id));
   const missing = INITIAL_PRODUCTS.filter(p => !savedIds.has(p.id));
-  const products = [...saved.products, ...missing];
+
+  // Para produtos conhecidos, força as etapas definidas no código
+  const products = [
+    ...saved.products.map(p => initialById[p.id] ? { ...p, components: initialById[p.id].components } : p),
+    ...missing,
+  ];
+
   const compStatus = { ...saved.compStatus };
+
+  // Atualiza status dos produtos conhecidos para refletir as novas etapas
+  for (const p of products) {
+    if (!initialById[p.id]) continue;
+    const existing = saved.compStatus[p.id] || {};
+    compStatus[p.id] = {};
+    for (const c of p.components) {
+      compStatus[p.id][c] = existing[c] || INITIAL_STATUS_OVERRIDES[p.id]?.[c] || { status: "pending", note: "" };
+    }
+  }
+
   for (const p of missing) {
     compStatus[p.id] = {};
     for (const c of p.components) compStatus[p.id][c] = INITIAL_STATUS_OVERRIDES[p.id]?.[c] || { status: "pending", note: "" };
